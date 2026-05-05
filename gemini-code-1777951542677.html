@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="zh-HK">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>名片識別優化版</title>
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+    <style>
+        :root { --primary: #0056b3; --accent: #ffd700; --bg: #f4f7f9; }
+        body { font-family: -apple-system, sans-serif; background: var(--bg); margin: 0; padding-bottom: 30px; }
+        .header { background: var(--primary); color: white; padding: 15px; text-align: center; font-weight: bold; }
+        .container { padding: 15px; max-width: 500px; margin: auto; }
+        
+        /* 拍攝按鈕與預覽 */
+        .action-box { background: white; padding: 20px; border-radius: 15px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); text-align: center; }
+        .btn-main { background: var(--primary); color: white; border: none; padding: 15px 30px; border-radius: 50px; font-size: 1.1rem; width: 100%; cursor: pointer; }
+        #preview-container { margin-top: 15px; position: relative; display: none; }
+        #preview-img { width: 100%; border-radius: 10px; border: 2px solid #ddd; }
+
+        /* 辨識中動畫 */
+        #loader { display: none; margin: 20px 0; color: var(--primary); font-weight: bold; }
+        .dot-ani { animation: blink 1.4s infinite both; }
+        @keyframes blink { 0% { opacity: .2; } 20% { opacity: 1; } 100% { opacity: .2; } }
+
+        /* 結果表單 */
+        #result-card { background: white; padding: 20px; border-radius: 15px; margin-top: 20px; display: none; border-top: 5px solid var(--accent); }
+        .field { margin-bottom: 15px; }
+        .field label { display: block; font-size: 0.85rem; color: #666; margin-bottom: 5px; font-weight: bold; }
+        .field input, .field textarea { width: 100%; padding: 12px; border: 1px solid #ccc; border-radius: 8px; box-sizing: border-box; font-size: 1rem; }
+        .save-btn { background: #28a745; color: white; border: none; padding: 15px; width: 100%; border-radius: 8px; font-size: 1.1rem; cursor: pointer; }
+
+        /* 歷史記錄 */
+        .history-header { margin: 25px 0 10px; display: flex; justify-content: space-between; align-items: center; }
+        .card-item { background: white; padding: 15px; border-radius: 10px; margin-bottom: 10px; position: relative; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
+        .card-co { font-weight: bold; color: var(--primary); margin-bottom: 5px; }
+        .card-em { color: #555; font-size: 0.9rem; }
+        .del-btn { color: #ff4444; border: none; background: none; font-size: 0.8rem; cursor: pointer; padding: 5px; }
+        canvas { display: none; }
+    </style>
+</head>
+<body>
+
+<div class="header">展覽會名片自動識別系統</div>
+
+<div class="container">
+    <div class="action-box">
+        <input type="file" id="scan-input" accept="image/*" capture="environment" style="display:none">
+        <button class="btn-main" onclick="document.getElementById('scan-input').click()">📸 拍攝並識別名片</button>
+        
+        <div id="preview-container">
+            <img id="preview-img">
+            <div id="loader">🔍 正在精準辨識關鍵字<span class="dot-ani">...</span></div>
+        </div>
+    </div>
+
+    <!-- 識別結果編輯區 -->
+    <div id="result-card">
+        <div class="field">
+            <label>🏢 公司名稱 (識別關鍵字: LTD, LIMITED)</label>
+            <input type="text" id="out-company">
+        </div>
+        <div class="field">
+            <label>📧 電郵地址 (識別關鍵字: @)</label>
+            <input type="email" id="out-email">
+        </div>
+        <div class="field">
+            <label>📝 跟進事項備註</label>
+            <textarea id="out-note" rows="3" placeholder="例如：對 10.1 吋 In-cell TFT 感興趣"></textarea>
+        </div>
+        <button class="save-btn" onclick="saveToLocal()">✅ 確認儲存</button>
+    </div>
+
+    <hr style="border: 0; border-top: 1px solid #ddd; margin: 30px 0;">
+
+    <div class="history-header">
+        <h3>已儲存資料</h3>
+        <span id="count" style="font-size: 0.8rem; color: #888;">0 筆</span>
+    </div>
+    <div id="history-list"></div>
+</div>
+
+<canvas id="hidden-canvas"></canvas>
+
+<script>
+let ocrWorker = null;
+
+// 初始化引擎
+async function loadOCR() {
+    ocrWorker = await Tesseract.createWorker('eng+chi_tra');
+}
+loadOCR();
+
+document.getElementById('scan-input').onchange = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    // 顯示預覽與動畫
+    const imgUrl = URL.createObjectURL(file);
+    document.getElementById('preview-img').src = imgUrl;
+    document.getElementById('preview-container').style.display = 'block';
+    document.getElementById('loader').style.display = 'block';
+    document.getElementById('result-card').style.display = 'none';
+
+    const img = new Image();
+    img.src = imgUrl;
+    img.onload = async () => {
+        // 影像增強處理：灰階 + 對比
+        const cvs = document.getElementById('hidden-canvas');
+        const ctx = cvs.getContext('2d');
+        cvs.width = img.width;
+        cvs.height = img.height;
+        ctx.filter = 'contrast(1.4) grayscale(1)';
+        ctx.drawImage(img, 0, 0);
+
+        if(!ocrWorker) await loadOCR();
+        const { data: { text } } = await ocrWorker.recognize(cvs);
+        processBusinessText(text);
+    };
+};
+
+function processBusinessText(rawText) {
+    // 將所有文字分行並清理空白
+    const lines = rawText.split('\n').map(s => s.trim()).filter(s => s.length > 0);
+    
+    let detectedEmail = "";
+    let detectedCompany = "";
+
+    // 1. 強力過濾電郵 (關鍵字 @)
+    const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/;
+    const emailMatch = rawText.match(emailRegex);
+    if (emailMatch) detectedEmail = emailMatch[0];
+
+    // 2. 優化關聯字眼過濾公司名 (LTD, LIMITED)
+    // 我們尋找包含這些後綴的行，且排除包含電郵、網址或純數字的行
+    const coKeywords = /(LTD|LIMITED|Ltd|Limited|公司|集团|集團|實業|实业)/;
+    const noiseKeywords = /(Tel|Fax|Mob|Add|Email|http|www|\.com|\.hk)/i;
+
+    for (let line of lines) {
+        // 如果該行包含你指定的優化關鍵字 (LTD/LIMITED 等)
+        if (coKeywords.test(line)) {
+            // 排除雜訊
+            if (!line.includes('@') && !noiseKeywords.test(line)) {
+                detectedCompany = line;
+                break; 
+            }
+        }
+    }
+
+    // 3. 如果沒找到關鍵字後綴，嘗試抓取前兩行（名片最上方通常是公司名）
+    if (!detectedCompany && lines.length > 0) {
+        for (let i = 0; i < Math.min(3, lines.length); i++) {
+            if (!lines[i].includes('@') && !/[0-9]{8,}/.test(lines[i]) && !noiseKeywords.test(lines[i])) {
+                detectedCompany = lines[i];
+                break;
+            }
+        }
+    }
+
+    // 填入表單
+    document.getElementById('out-company').value = detectedCompany;
+    document.getElementById('out-email').value = detectedEmail;
+    document.getElementById('out-note').value = "";
+    
+    document.getElementById('loader').style.display = 'none';
+    document.getElementById('result-card').style.display = 'block';
+    document.getElementById('result-card').scrollIntoView({ behavior: 'smooth' });
+}
+
+function saveToLocal() {
+    const co = document.getElementById('out-company').value;
+    const em = document.getElementById('out-email').value;
+    const nt = document.getElementById('out-note').value;
+
+    if (!co && !em) {
+        alert("請確認公司或電郵資訊");
+        return;
+    }
+
+    const newRecord = {
+        id: Date.now(),
+        company: co,
+        email: em,
+        note: nt,
+        time: new Date().toLocaleString()
+    };
+
+    const data = JSON.parse(localStorage.getItem('exhibit_data') || '[]');
+    data.unshift(newRecord);
+    localStorage.setItem('exhibit_data', JSON.stringify(data));
+
+    alert("儲存成功");
+    document.getElementById('result-card').style.display = 'none';
+    document.getElementById('preview-container').style.display = 'none';
+    renderHistory();
+}
+
+function renderHistory() {
+    const data = JSON.parse(localStorage.getItem('exhibit_data') || '[]');
+    document.getElementById('count').innerText = data.length + " 筆";
+    const list = document.getElementById('history-list');
+    
+    list.innerHTML = data.map(item => `
+        <div class="card-item">
+            <div style="display:flex; justify-content:space-between;">
+                <div class="card-co">${item.company || '未知公司'}</div>
+                <button class="del-btn" onclick="deleteItem(${item.id})">刪除</button>
+            </div>
+            <div class="card-em">${item.email || '無電郵記錄'}</div>
+            <div style="font-size:0.7rem; color:#aaa; margin-top:5px;">${item.time}</div>
+            ${item.note ? `<div style="margin-top:8px; font-size:0.85rem; background:#f9f9f9; padding:5px; border-radius:4px;">${item.note}</div>` : ''}
+        </div>
+    `).join('');
+}
+
+function deleteItem(id) {
+    if(!confirm('確定刪除此記錄？')) return;
+    let data = JSON.parse(localStorage.getItem('exhibit_data') || '[]');
+    data = data.filter(d => d.id !== id);
+    localStorage.setItem('exhibit_data', JSON.stringify(data));
+    renderHistory();
+}
+
+// 初始渲染
+renderHistory();
+</script>
+
+</body>
+</html>
